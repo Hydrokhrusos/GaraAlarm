@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "monitor": 1,
+  "monitor_geometry": {
+    "left": 0,
+    "top": 0,
+    "width": 2560,
+    "height": 1440
+  },
+  "search_box": {
+    "left": 972,
+    "top": 0,
+    "width": 1588,
+    "height": 604
+  },
+  "scan_interval_seconds": 0.45,
+  "ocr_interval_seconds": 0.72,
+  "only_when_warframe_focused": true,
+  "tesseract_cmd": "C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+  "buffs": {
+    "splinter_storm": {
+      "name": "Splinter Storm",
+      "template": "templates/splinter_storm.png",
+      "sound": "sounds/splinter_storm.wav",
+      "warnings": [
+        10,
+        5
+      ],
+      "match_threshold": 0.68,
+      "max_reasonable_seconds": 180.0,
+      "timer_offset": {
+        "x": -4,
+        "y": 55
+      },
+      "timer_size": {
+        "width": 58,
+        "height": 32
+      },
+      "ocr_mode": "otsu_inv:8"
+    },
+    "roar": {
+      "name": "Roar",
+      "template": "templates/roar.png",
+      "sound": "sounds/roar.wav",
+      "warnings": [
+        8,
+        3
+      ],
+      "match_threshold": 0.68,
+      "max_reasonable_seconds": 180.0,
+      "timer_offset": {
+        "x": -9,
+        "y": 50
+      },
+      "timer_size": {
+        "width": 61,
+        "height": 33
+      },
+      "ocr_mode": "otsu_inv:7"
+    }
+  }
+}
