@@ -42,7 +42,7 @@
         5
       ],
       "match_threshold": 0.68,
-      "max_reasonable_seconds": 180.0,
+      "max_reasonable_seconds": 90.0,
       "missing_grace_seconds": 2.2,
       "presence_confirm_hits": 2,
       "expiry_repeat": 1,

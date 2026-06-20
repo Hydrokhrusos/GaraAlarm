@@ -85,6 +85,10 @@ Restart the alarm after editing.
 
 Re-run calibration and select only the visible digits—not the icon, percentage, label, or surrounding space. A little padding is okay, but a huge box makes OCR worse.
 
+### Splinter Storm shows an impossible high timer
+
+The parser treats three bare digits like `100` as a missing decimal, so it reads that as `10.0`. Splinter Storm is also capped by `max_reasonable_seconds`; raise that only if your real timer can exceed `90` seconds.
+
 ### Roar produces a false ready alarm
 
 Raise Roar's `missing_grace_seconds` from `1.8` to `2.5` if brief misses arm the tracker while Roar is already ready. Slightly lower `match_threshold` if the ready/off icon is genuinely visible but not detected.

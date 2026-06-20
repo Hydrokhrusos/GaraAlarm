@@ -59,7 +59,7 @@ DEFAULT_BUFFS: dict[str, dict[str, Any]] = {
         "alert_mode": "thresholds",
         "warnings": [10, 5],
         "match_threshold": 0.68,
-        "max_reasonable_seconds": 180,
+        "max_reasonable_seconds": 90,
         "missing_grace_seconds": 2.2,
     },
     "roar": {
@@ -88,6 +88,8 @@ OCR_MODES = (
     "gray:8",
     "adaptive_inv:8",
 )
+
+MISSING_DECIMAL_MAX_SECONDS = 90.0
 
 CALIBRATION_TARGET_ALIASES = {
     "": "all",
@@ -807,10 +809,16 @@ def parse_timer_text(text: str) -> Optional[float]:
     number_match = re.search(r"\d+(?:\.\d+)?", compact)
     if not number_match:
         return None
+    raw_number = number_match.group(0)
     try:
-        return float(number_match.group(0))
+        seconds = float(raw_number)
     except ValueError:
         return None
+    if "." not in raw_number and len(raw_number) == 3:
+        decimal_seconds = seconds / 10.0
+        if decimal_seconds <= MISSING_DECIMAL_MAX_SECONDS:
+            return decimal_seconds
+    return seconds
 
 
 def mode_parts(mode: str) -> tuple[str, int]:
