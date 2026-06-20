@@ -1,21 +1,30 @@
-# Sophia Voice Asset Notice
+# Sophia Voice Assets — generated with ElevenLabs (`elevenlabs.io`)
 
-This branch is a non-commercial Sophia voice variant of GaraAlarm.
+This branch is the optional non-commercial Sophia voice variant of GaraAlarm.
+
+## License split
 
 Unless a file says otherwise, the source code remains licensed under the repository's MIT License.
 
-The following files are not licensed under MIT in this branch:
+The following files are **not** covered by the MIT License in this branch:
 
 - `sounds/splinter_storm.wav`
 - `sounds/splinter_storm_urgent.wav`
 - `sounds/roar.wav`
 
-These audio assets were generated with ElevenLabs using a Sophia voice. Attribution: `elevenlabs.io` / `11.ai`.
+These three files are not relicensed by this repository.
 
-These three audio files are provided for non-commercial use only and require attribution when shared. Do not sell, sublicense, include in commercial builds, or treat these audio files as MIT-licensed assets.
+## Generation record and attribution
 
-For the clean MIT version of GaraAlarm, use the `main` branch or replace these sounds with assets that are compatible with your chosen license.
+- Service: ElevenLabs (`elevenlabs.io` / `11.ai`)
+- Voice: **Sophia - British, Smooth and Engaging**
+- Voice ID: `jB2lPb5DhAX6l1TLkKXy`
+- Model: **Eleven Multilingual v2**
 
-## Branch rule
+These audio files were generated on an ElevenLabs free plan. They are included for non-commercial use with attribution to `elevenlabs.io` / `11.ai`, and remain subject to the applicable ElevenLabs terms and Prohibited Use Policy.
 
-Merge direction is intentionally one-way: `main` may be merged into `sophia`, but `sophia` should not be merged back into `main` unless the Sophia audio files and this notice are intentionally removed first.
+For the version without these ElevenLabs-generated files, use the `main` branch or replace the three sounds with assets whose license suits your use.
+
+## Branch policy
+
+Synchronization is intentionally one-way: updates from `main` may be merged into `sophia`, while the three Sophia audio files are preserved. Do not merge `sophia` back into `main` unless the Sophia audio files and this notice are deliberately removed first.
