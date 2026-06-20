@@ -459,7 +459,7 @@ def monitor_to_dict(monitor: Any) -> dict[str, int]:
 
 
 def list_monitors() -> list[dict[str, int]]:
-    with mss.mss() as sct:
+    with mss.MSS() as sct:
         return [monitor_to_dict(monitor) for monitor in sct.monitors]
 
 
@@ -1376,7 +1376,7 @@ def run_calibration(args: argparse.Namespace) -> None:
         time.sleep(1.0)
     print("Capturing now!          ")
 
-    with mss.mss() as sct:
+    with mss.MSS() as sct:
         calibration_frames = {
             key: grab_bgr(sct, monitor, search_boxes[key])
             for key in calibration_keys
@@ -1679,7 +1679,7 @@ def run_monitor(args: argparse.Namespace) -> None:
         "Splinter Storm warns before expiry; Roar alerts when its ready icon returns."
     )
     try:
-        with mss.mss() as sct:
+        with mss.MSS() as sct:
             while True:
                 loop_started = time.monotonic()
                 if focus_guard and not warframe_is_foreground():
