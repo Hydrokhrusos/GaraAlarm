@@ -9,7 +9,7 @@ if not exist ".venv\Scripts\python.exe" (
 echo What do you want to recalibrate?
 echo   1. all
 echo   2. Splinter Storm only
-echo   3. Roar ready/off icon only
+echo   3. Roar ready/no-energy icons only
 set /p CHOICE=Choose [1/all]: 
 set TARGET=all
 if "%CHOICE%"=="2" set TARGET=splinter_storm

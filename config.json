@@ -70,9 +70,16 @@
       "max_reasonable_seconds": 180.0,
       "missing_grace_seconds": 1.8,
       "presence_confirm_hits": 2,
-      "expiry_repeat": 2,
+      "expiry_repeat": 1,
       "inactive_reminder_seconds": 8.0,
-      "inactive_reminder_repeat": 1
+      "inactive_reminder_repeat": 1,
+      "max_inactive_alerts": 5,
+      "disabled_template": "templates/roar_disabled.png",
+      "disabled_match_threshold": 0.68,
+      "disabled_match_margin": 0.02,
+      "suppress_dim_ready_icon": true,
+      "dim_ready_brightness_ratio": 0.72,
+      "dim_ready_contrast_ratio": 0.75
     }
   }
 }

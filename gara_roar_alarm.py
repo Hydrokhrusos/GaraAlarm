@@ -66,17 +66,24 @@ DEFAULT_BUFFS: dict[str, dict[str, Any]] = {
     "roar": {
         "name": "Roar",
         "template": "templates/roar.png",
+        "disabled_template": "templates/roar_disabled.png",
         "sound": "sounds/roar.wav",
         "alert_mode": "on_ready",
         "warnings": [],
         "match_threshold": 0.68,
+        "disabled_match_threshold": 0.68,
+        "disabled_match_margin": 0.02,
         "max_reasonable_seconds": 180,
         "missing_grace_seconds": 1.8,
         "match_mode": "gray_or_edges",
         "presence_confirm_hits": 2,
-        "expiry_repeat": 2,
+        "expiry_repeat": 1,
         "inactive_reminder_seconds": 8.0,
         "inactive_reminder_repeat": 1,
+        "max_inactive_alerts": 5,
+        "suppress_dim_ready_icon": True,
+        "dim_ready_brightness_ratio": 0.72,
+        "dim_ready_contrast_ratio": 0.75,
     },
 }
 
@@ -153,6 +160,20 @@ class TrackerState:
     last_inactive_alert_at: float = 0.0
     presence_seen_streak: int = 0
     ever_ready: bool = False
+    ready_actionable: bool = True
+    pending_actionable_alert: bool = False
+    inactive_alert_count: int = 0
+    max_inactive_alerts: int = 0
+
+    def inactive_alert_limit_reached(self) -> bool:
+        return (
+            self.max_inactive_alerts > 0
+            and self.inactive_alert_count >= self.max_inactive_alerts
+        )
+
+    def record_inactive_alert(self) -> None:
+        self.inactive_alert_count += 1
+        self.pending_actionable_alert = False
 
     def estimate(self, now: Optional[float] = None) -> Optional[float]:
         if self.last_timer is None:
@@ -161,7 +182,42 @@ class TrackerState:
             now = time.monotonic()
         return max(0.0, self.last_timer - max(0.0, now - self.last_ocr_at))
 
-    def mark_seen(self, detection: Detection, now: float) -> Optional[str]:
+    def _trigger_thresholds_at(self, value: float) -> tuple[Optional[float], bool]:
+        if self.alert_mode != "thresholds":
+            return None, False
+
+        warnings_desc = sorted(set(self.warnings), reverse=True)
+        if not warnings_desc:
+            return None, False
+
+        crossed = [
+            threshold
+            for threshold in warnings_desc
+            if threshold not in self.fired and value <= threshold
+        ]
+        if not crossed:
+            return None, False
+
+        chosen = min(crossed)  # Most urgent threshold reached.
+        for threshold in warnings_desc:
+            if value <= threshold:
+                self.fired.add(threshold)
+        urgent = chosen == min(warnings_desc)
+        return chosen, urgent
+
+    def check_thresholds(self, now: float) -> tuple[Optional[float], bool]:
+        if not self.active:
+            return None, False
+        if self.pending_refresh_value is not None:
+            return None, False
+        value = self.estimate(now)
+        if value is None:
+            return None, False
+        return self._trigger_thresholds_at(value)
+
+    def mark_seen(
+        self, detection: Detection, now: float, actionable: bool = True
+    ) -> Optional[str]:
         self.last_seen_at = now
         self.last_detection = detection
         self.missing_since = None
@@ -178,6 +234,7 @@ class TrackerState:
             self.last_timer = None
             if not was_active:
                 self.last_inactive_alert_at = 0.0
+                self.inactive_alert_count = 0
             return None
 
         # For bottom-right Roar tracking, the calibrated template is the stable
@@ -189,17 +246,39 @@ class TrackerState:
                 return None
             was_active = self.active
             self.ever_ready = True
+            self.ready_actionable = actionable
             self.active = False
             self.last_timer = None
             self.pending_refresh_value = None
             self.pending_refresh_at = 0.0
             if was_active and self.ever_active:
+                if not actionable:
+                    self.last_inactive_alert_at = 0.0
+                    self.pending_actionable_alert = True
+                    return None
+                if self.inactive_alert_limit_reached():
+                    self.pending_actionable_alert = False
+                    return None
                 self.last_inactive_alert_at = now
+                self.pending_actionable_alert = False
+                return "expired"
+            if self.pending_actionable_alert:
+                if not actionable:
+                    return None
+                if self.inactive_alert_limit_reached():
+                    self.pending_actionable_alert = False
+                    return None
+                self.last_inactive_alert_at = now
+                self.pending_actionable_alert = False
                 return "expired"
             if self.ever_active and self.inactive_reminder_seconds > 0.0:
+                if not actionable:
+                    return None
                 if self.last_inactive_alert_at <= 0.0:
                     self.last_inactive_alert_at = now
                 elif now - self.last_inactive_alert_at >= self.inactive_reminder_seconds:
+                    if self.inactive_alert_limit_reached():
+                        return None
                     self.last_inactive_alert_at = now
                     return "reminder"
             return None
@@ -226,6 +305,9 @@ class TrackerState:
             if not self.active:
                 self.active = True
                 self.ever_active = True
+                self.ready_actionable = True
+                self.pending_actionable_alert = False
+                self.inactive_alert_count = 0
                 self.last_timer = None
                 self.pending_refresh_value = None
                 self.pending_refresh_at = 0.0
@@ -238,6 +320,8 @@ class TrackerState:
             self.pending_refresh_value = None
             self.pending_refresh_at = 0.0
             if self.alert_mode == "on_expire" and self.ever_active:
+                if self.inactive_alert_limit_reached():
+                    return None
                 self.last_inactive_alert_at = now
                 return "expired"
             return None
@@ -250,6 +334,8 @@ class TrackerState:
             if self.last_inactive_alert_at <= 0.0:
                 self.last_inactive_alert_at = now
             elif now - self.last_inactive_alert_at >= self.inactive_reminder_seconds:
+                if self.inactive_alert_limit_reached():
+                    return None
                 self.last_inactive_alert_at = now
                 return "reminder"
         return None
@@ -264,7 +350,6 @@ class TrackerState:
         if not (0.0 <= value <= self.max_reasonable_seconds):
             return None, False
 
-        previous_timer = self.last_timer
         previous_estimate = self.estimate(now)
         was_active = self.active
 
@@ -320,39 +405,7 @@ class TrackerState:
         self.last_ocr_text = result.text
         self.last_ocr_mode = result.mode
 
-        if self.alert_mode != "thresholds":
-            return None, False
-
-        warnings_desc = sorted(set(self.warnings), reverse=True)
-        if not warnings_desc:
-            return None, False
-
-        crossed: list[float] = []
-        if not was_active:
-            # Starting the script mid-buff should still warn, but only with the
-            # most urgent applicable threshold rather than playing every sound.
-            crossed = [threshold for threshold in warnings_desc if value <= threshold]
-        elif not refreshed and previous_estimate is not None:
-            # Compare with the last OCR reading as well as its time-adjusted
-            # estimate. Otherwise a threshold crossed between OCR samples could
-            # be missed because the estimate is already below it.
-            upper_bound = max(previous_estimate, previous_timer or previous_estimate)
-            crossed = [
-                threshold
-                for threshold in warnings_desc
-                if threshold not in self.fired
-                and upper_bound > threshold >= value
-            ]
-
-        if not crossed:
-            return None, False
-
-        chosen = min(crossed)  # Most urgent threshold reached.
-        for threshold in warnings_desc:
-            if value <= threshold:
-                self.fired.add(threshold)
-        urgent = chosen == min(warnings_desc)
-        return chosen, urgent
+        return self._trigger_thresholds_at(value)
 
 
 class SoundWorker:
@@ -984,6 +1037,101 @@ def locate_template(
     return best
 
 
+def matched_icon_is_dimmed(
+    frame: np.ndarray,
+    detection: Detection,
+    template: np.ndarray,
+    brightness_ratio: float,
+    contrast_ratio: float,
+) -> bool:
+    crop = crop_roi(
+        frame,
+        (detection.x, detection.y, detection.width, detection.height),
+    )
+    if crop.size == 0 or template.size == 0:
+        return False
+    if crop.shape[:2] != template.shape[:2]:
+        template = cv2.resize(
+            template,
+            (crop.shape[1], crop.shape[0]),
+            interpolation=cv2.INTER_AREA,
+        )
+
+    crop_gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+    cutoff = float(np.percentile(template_gray, 85))
+    bright_mask = template_gray >= cutoff
+    if int(np.count_nonzero(bright_mask)) < 8:
+        bright_mask = template_gray >= float(np.percentile(template_gray, 75))
+    if int(np.count_nonzero(bright_mask)) < 8:
+        return False
+
+    crop_bright = float(np.mean(crop_gray[bright_mask]))
+    template_bright = max(1.0, float(np.mean(template_gray[bright_mask])))
+    crop_contrast = float(
+        np.percentile(crop_gray, 90) - np.percentile(crop_gray, 10)
+    )
+    template_contrast = max(
+        1.0,
+        float(np.percentile(template_gray, 90) - np.percentile(template_gray, 10)),
+    )
+    return (
+        crop_bright <= template_bright * brightness_ratio
+        and crop_contrast <= template_contrast * contrast_ratio
+    )
+
+
+def ready_icon_actionable(
+    frame: np.ndarray,
+    detection: Detection,
+    template: np.ndarray,
+    buff: dict[str, Any],
+) -> bool:
+    if not bool(buff.get("suppress_dim_ready_icon", True)):
+        return True
+    return not matched_icon_is_dimmed(
+        frame,
+        detection,
+        template,
+        float(buff.get("dim_ready_brightness_ratio", 0.72)),
+        float(buff.get("dim_ready_contrast_ratio", 0.75)),
+    )
+
+
+def locate_ready_icon(
+    frame: np.ndarray,
+    ready_template: np.ndarray,
+    disabled_template: Optional[np.ndarray],
+    buff: dict[str, Any],
+) -> tuple[Optional[Detection], bool]:
+    match_mode = str(buff.get("match_mode", "gray_or_edges"))
+    ready_threshold = float(buff.get("match_threshold", 0.68))
+    ready_detection = locate_template(frame, ready_template, match_mode)
+    ready_ok = (
+        ready_detection is not None and ready_detection.score >= ready_threshold
+    )
+
+    if disabled_template is not None:
+        disabled_detection = locate_template(frame, disabled_template, match_mode)
+        disabled_threshold = float(
+            buff.get("disabled_match_threshold", ready_threshold)
+        )
+        disabled_ok = (
+            disabled_detection is not None
+            and disabled_detection.score >= disabled_threshold
+        )
+        if disabled_ok:
+            ready_score = ready_detection.score if ready_detection is not None else 0.0
+            margin = float(buff.get("disabled_match_margin", 0.02))
+            if not ready_ok or disabled_detection.score >= ready_score + margin:
+                return disabled_detection, False
+
+    if ready_ok:
+        actionable = ready_icon_actionable(frame, ready_detection, ready_template, buff)
+        return ready_detection, actionable
+    return None, True
+
+
 def safe_timer_crop(
     frame: np.ndarray,
     detection: Detection,
@@ -1072,6 +1220,56 @@ def preview_timer_and_get_expected(timer_crop: np.ndarray, name: str) -> Optiona
     return value
 
 
+def calibrate_roar_disabled_template(
+    frame: np.ndarray, defaults: dict[str, Any]
+) -> str:
+    name = str(defaults["name"])
+    template_path = BASE_DIR / str(defaults["disabled_template"])
+
+    while True:
+        try:
+            tile_roi = select_roi(
+                frame,
+                "STEP 1 - Select the whole bottom-right Roar no-energy indicator",
+                max_upscale=1.6,
+            )
+            tile_roi = padded_roi(tile_roi, 8, frame.shape[1], frame.shape[0])
+            tile = crop_roi(frame, tile_roi)
+
+            icon_local = select_roi(
+                tile,
+                "STEP 2 - Select ONLY the grayed/no-energy Roar icon, tightly",
+                max_width=1100,
+                max_height=850,
+                max_upscale=12.0,
+            )
+        except ConfigurationError as exc:
+            print(exc)
+            retry = input("Retry the Roar no-energy icon? [Y/n]: ").strip().lower()
+            if retry in ("", "y", "yes"):
+                continue
+            raise
+
+        tile_x, tile_y, _, _ = tile_roi
+        icon_x, icon_y, icon_width, icon_height = icon_local
+        icon_absolute = (
+            tile_x + icon_x,
+            tile_y + icon_y,
+            icon_width,
+            icon_height,
+        )
+        template = crop_roi(frame, icon_absolute)
+        if template.shape[0] < 6 or template.shape[1] < 6:
+            print("That icon selection is too small; select it again.")
+            continue
+
+        template_path.parent.mkdir(parents=True, exist_ok=True)
+        if not cv2.imwrite(str(template_path), template):
+            raise RuntimeError(f"Could not save {template_path}")
+        print(f"{name}: no-energy icon calibrated.")
+        return str(defaults["disabled_template"])
+
+
 def calibrate_buff(
     frame: np.ndarray,
     key: str,
@@ -1158,7 +1356,29 @@ def calibrate_buff(
             "inactive_reminder_repeat": int(
                 defaults.get("inactive_reminder_repeat", 1)
             ),
+            "max_inactive_alerts": int(defaults.get("max_inactive_alerts", 0)),
         }
+        if alert_mode == "on_ready":
+            buff_config.update(
+                {
+                    "disabled_template": str(defaults["disabled_template"]),
+                    "disabled_match_threshold": float(
+                        defaults.get("disabled_match_threshold", 0.68)
+                    ),
+                    "disabled_match_margin": float(
+                        defaults.get("disabled_match_margin", 0.02)
+                    ),
+                    "suppress_dim_ready_icon": bool(
+                        defaults.get("suppress_dim_ready_icon", True)
+                    ),
+                    "dim_ready_brightness_ratio": float(
+                        defaults.get("dim_ready_brightness_ratio", 0.72)
+                    ),
+                    "dim_ready_contrast_ratio": float(
+                        defaults.get("dim_ready_contrast_ratio", 0.75)
+                    ),
+                }
+            )
         if "urgent_sound" in defaults:
             buff_config["urgent_sound"] = str(defaults["urgent_sound"])
 
@@ -1253,7 +1473,7 @@ def choose_calibration_target(raw: Optional[str]) -> str:
     print("\nWhat do you want to recalibrate?")
     print("  1. all")
     print("  2. Splinter Storm only")
-    print("  3. Roar ready/off icon only")
+    print("  3. Roar ready/no-energy icons only")
     while True:
         choice = input("Choose [1/all]: ").strip()
         try:
@@ -1281,6 +1501,13 @@ def calibration_defaults(
         defaults["alert_mode"] = "on_ready"
         defaults["warnings"] = []
         defaults.setdefault("match_mode", "gray_or_edges")
+        defaults.setdefault("disabled_template", "templates/roar_disabled.png")
+        defaults.setdefault("disabled_match_threshold", 0.68)
+        defaults.setdefault("disabled_match_margin", 0.02)
+        defaults.setdefault("max_inactive_alerts", 5)
+        defaults.setdefault("suppress_dim_ready_icon", True)
+        defaults.setdefault("dim_ready_brightness_ratio", 0.72)
+        defaults.setdefault("dim_ready_contrast_ratio", 0.75)
     return defaults
 
 
@@ -1407,9 +1634,47 @@ def run_calibration(args: argparse.Namespace) -> None:
         buff_configs[key] = calibrate_buff(calibration_frames[key], key, defaults)
 
     if isinstance(buff_configs.get("roar"), dict):
+        if "roar" in calibration_keys:
+            choice = input(
+                "\nCalibrate Roar's grayed/no-energy icon too? [Y/n]: "
+            ).strip().lower()
+            if choice in ("", "y", "yes"):
+                print(
+                    "\nSwitch to Warframe and make Roar's bottom-right icon "
+                    "gray because you do not have enough energy."
+                )
+                input("Press Enter to begin the no-energy capture countdown...")
+                delay = max(3, int(args.capture_delay))
+                for remaining in range(delay, 0, -1):
+                    print(f"Capturing in {remaining:2d}s...", end="\r", flush=True)
+                    time.sleep(1.0)
+                print("Capturing now!          ")
+                with mss.MSS() as sct:
+                    disabled_frame = grab_bgr(sct, monitor, search_boxes["roar"])
+                beep_capture_complete()
+                print(
+                    "No-energy screenshot frozen. Alt-Tab back to the selector "
+                    "window if needed."
+                )
+                defaults = calibration_defaults(
+                    "roar", {"buffs": {"roar": buff_configs["roar"]}}
+                )
+                buff_configs["roar"][
+                    "disabled_template"
+                ] = calibrate_roar_disabled_template(disabled_frame, defaults)
+
         buff_configs["roar"]["alert_mode"] = "on_ready"
         buff_configs["roar"]["warnings"] = []
         buff_configs["roar"].setdefault("match_mode", "gray_or_edges")
+        buff_configs["roar"].setdefault(
+            "disabled_template", "templates/roar_disabled.png"
+        )
+        buff_configs["roar"].setdefault("disabled_match_threshold", 0.68)
+        buff_configs["roar"].setdefault("disabled_match_margin", 0.02)
+        buff_configs["roar"].setdefault("max_inactive_alerts", 5)
+        buff_configs["roar"].setdefault("suppress_dim_ready_icon", True)
+        buff_configs["roar"].setdefault("dim_ready_brightness_ratio", 0.72)
+        buff_configs["roar"].setdefault("dim_ready_contrast_ratio", 0.75)
 
     config: dict[str, Any] = dict(existing_config or {})
     config.update(
@@ -1444,8 +1709,9 @@ def verify_monitor_geometry(
 
 def build_runtime(
     config: dict[str, Any]
-) -> tuple[dict[str, np.ndarray], dict[str, TrackerState]]:
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, TrackerState]]:
     templates: dict[str, np.ndarray] = {}
+    disabled_templates: dict[str, np.ndarray] = {}
     states: dict[str, TrackerState] = {}
     for key, buff in config["buffs"].items():
         path = BASE_DIR / str(buff["template"])
@@ -1453,6 +1719,14 @@ def build_runtime(
         if template is None:
             raise ConfigurationError(f"Missing template image: {path}")
         templates[key] = template
+        if key == "roar":
+            disabled_template = str(buff.get("disabled_template", "")).strip()
+            if disabled_template:
+                disabled_path = BASE_DIR / disabled_template
+                if disabled_path.is_file():
+                    disabled_image = cv2.imread(str(disabled_path), cv2.IMREAD_COLOR)
+                    if disabled_image is not None:
+                        disabled_templates[key] = disabled_image
         warnings = [float(value) for value in buff.get("warnings", [])]
 
         # Backward compatibility: old configs had Roar warning thresholds and
@@ -1496,8 +1770,17 @@ def build_runtime(
                 1,
                 int(buff.get("presence_confirm_hits", 2)),
             ),
+            max_inactive_alerts=max(
+                0,
+                int(
+                    buff.get(
+                        "max_inactive_alerts",
+                        5 if alert_mode == "on_ready" else 0,
+                    )
+                ),
+            ),
         )
-    return templates, states
+    return templates, disabled_templates, states
 
 
 def debug_annotate(
@@ -1545,7 +1828,7 @@ def debug_annotate(
             estimate = state.estimate(now)
             state_text = "?" if estimate is None else f"{estimate:.1f}s"
         elif state.alert_mode == "on_ready":
-            state_text = "READY"
+            state_text = "READY" if state.ready_actionable else "NO ENERGY"
         else:
             state_text = "ACTIVE"
 
@@ -1584,8 +1867,9 @@ def status_text(
 
         if state.alert_mode == "on_ready":
             if state.last_detection is not None:
+                state_label = "READY" if state.ready_actionable else "NO ENERGY"
                 parts.append(
-                    f"{state.name}: READY [{state.last_detection.score:.2f}]"
+                    f"{state.name}: {state_label} [{state.last_detection.score:.2f}]"
                 )
             elif state.active:
                 parts.append(f"{state.name}: ACTIVE")
@@ -1617,6 +1901,22 @@ def alert_sound_path(buff: dict[str, Any], urgent: bool = False) -> Path:
         if urgent_sound:
             return BASE_DIR / urgent_sound
     return BASE_DIR / str(buff["sound"])
+
+
+def play_threshold_alert(
+    sound_worker: SoundWorker,
+    buff: dict[str, Any],
+    state: TrackerState,
+    crossed: float,
+    urgent: bool,
+) -> None:
+    sound_path = alert_sound_path(buff, urgent=urgent)
+    print(
+        f"\n[ALERT] {state.name}: approximately {crossed:g}s remaining"
+        + (" — URGENT" if urgent else "")
+    )
+    label = f"{state.name} urgent" if urgent else state.name
+    sound_worker.play(sound_path, 1, label)
 
 
 def run_sound_test(config: dict[str, Any]) -> None:
@@ -1664,7 +1964,7 @@ def run_monitor(args: argparse.Namespace) -> None:
         run_sound_test(config)
         return
 
-    templates, states = build_runtime(config)
+    templates, disabled_templates, states = build_runtime(config)
     search_boxes = search_boxes_for_config(config)
     sound_worker = SoundWorker()
     scan_interval = max(0.15, float(config.get("scan_interval_seconds", 0.45)))
@@ -1689,27 +1989,45 @@ def run_monitor(args: argparse.Namespace) -> None:
                     time.sleep(0.35)
                     continue
 
-                now = time.monotonic()
                 for key, state in states.items():
                     buff = config["buffs"][key]
                     frame = grab_bgr(sct, monitor, search_boxes[key])
-                    detection = locate_template(
-                        frame,
-                        templates[key],
-                        str(
-                            buff.get(
-                                "match_mode",
-                                "gray_or_edges" if key == "roar" else "gray",
-                            )
-                        ),
-                    )
-                    threshold = float(buff.get("match_threshold", 0.68))
-                    if detection is None or detection.score < threshold:
+                    now = time.monotonic()
+                    actionable = True
+                    if state.alert_mode == "on_ready":
+                        detection, actionable = locate_ready_icon(
+                            frame,
+                            templates[key],
+                            disabled_templates.get(key),
+                            buff,
+                        )
+                    else:
+                        detection = locate_template(
+                            frame,
+                            templates[key],
+                            str(
+                                buff.get(
+                                    "match_mode",
+                                    "gray_or_edges" if key == "roar" else "gray",
+                                )
+                            ),
+                        )
+                        threshold = float(buff.get("match_threshold", 0.68))
+                        if detection is not None and detection.score < threshold:
+                            detection = None
+
+                    if detection is None:
                         event = state.mark_missing(now)
                         if event is not None:
                             sound_path = BASE_DIR / str(buff["sound"])
                             if event == "expired":
-                                repeat = max(1, int(buff.get("expiry_repeat", 2)))
+                                default_repeat = (
+                                    1 if state.alert_mode == "on_ready" else 2
+                                )
+                                repeat = max(
+                                    1,
+                                    int(buff.get("expiry_repeat", default_repeat)),
+                                )
                                 message = f"{state.name} ended — recast now"
                             else:
                                 repeat = max(
@@ -1719,13 +2037,20 @@ def run_monitor(args: argparse.Namespace) -> None:
                                 message = f"{state.name} is still down — recast it"
                             print(f"\n[ALERT] {message}")
                             sound_worker.play(sound_path, repeat, state.name)
+                            state.record_inactive_alert()
                         continue
 
-                    event = state.mark_seen(detection, now)
+                    event = state.mark_seen(detection, now, actionable=actionable)
                     if event is not None:
                         sound_path = BASE_DIR / str(buff["sound"])
                         if event == "expired":
-                            repeat = max(1, int(buff.get("expiry_repeat", 2)))
+                            default_repeat = (
+                                1 if state.alert_mode == "on_ready" else 2
+                            )
+                            repeat = max(
+                                1,
+                                int(buff.get("expiry_repeat", default_repeat)),
+                            )
                         else:
                             repeat = max(
                                 1,
@@ -1734,15 +2059,21 @@ def run_monitor(args: argparse.Namespace) -> None:
                         message = alert_text(state, event)
                         print(f"\n[ALERT] {message}")
                         sound_worker.play(sound_path, repeat, state.name)
+                        state.record_inactive_alert()
 
                     # Roar is deliberately icon-only. We do not OCR its timer;
                     # the bottom-right ready icon tells us when it can be recast.
                     if state.alert_mode in {"on_expire", "on_ready"}:
                         continue
 
-                    if now - last_ocr_attempt[key] < ocr_interval:
+                    crossed, urgent = state.check_thresholds(time.monotonic())
+                    if crossed is not None:
+                        play_threshold_alert(sound_worker, buff, state, crossed, urgent)
+
+                    ocr_started_at = time.monotonic()
+                    if ocr_started_at - last_ocr_attempt[key] < ocr_interval:
                         continue
-                    last_ocr_attempt[key] = now
+                    last_ocr_attempt[key] = ocr_started_at
 
                     timer_offset = buff.get("timer_offset")
                     timer_size = buff.get("timer_size")
@@ -1765,31 +2096,37 @@ def run_monitor(args: argparse.Namespace) -> None:
                         max_reasonable=float(buff.get("max_reasonable_seconds", 180)),
                     )
                     if result is None:
+                        crossed, urgent = state.check_thresholds(time.monotonic())
+                        if crossed is not None:
+                            play_threshold_alert(
+                                sound_worker, buff, state, crossed, urgent
+                            )
                         continue
 
                     crossed, urgent = state.accept_timer(result, now)
                     if crossed is not None:
-                        sound_path = alert_sound_path(buff, urgent=urgent)
-                        repeat = 2 if urgent else 1
-                        print(
-                            f"\n[ALERT] {state.name}: approximately {crossed:g}s remaining"
-                            + (" — URGENT" if urgent else "")
-                        )
-                        label = f"{state.name} urgent" if urgent else state.name
-                        sound_worker.play(sound_path, repeat, label)
+                        play_threshold_alert(sound_worker, buff, state, crossed, urgent)
+                    else:
+                        crossed, urgent = state.check_thresholds(time.monotonic())
+                        if crossed is not None:
+                            play_threshold_alert(
+                                sound_worker, buff, state, crossed, urgent
+                            )
 
                     if args.debug:
                         DEBUG_DIR.mkdir(parents=True, exist_ok=True)
                         cv2.imwrite(str(DEBUG_DIR / f"{key}_timer.png"), timer_crop)
 
-                status_width = print_status(status_text(states, now), status_width)
+                status_now = time.monotonic()
+                status_width = print_status(status_text(states, status_now), status_width)
 
-                if args.debug and now - last_debug_write >= 1.0:
+                debug_now = time.monotonic()
+                if args.debug and debug_now - last_debug_write >= 1.0:
                     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
                     frame = grab_bgr(sct, monitor, full_monitor_box(monitor))
-                    annotated = debug_annotate(frame, states, config, now)
+                    annotated = debug_annotate(frame, states, config, debug_now)
                     cv2.imwrite(str(DEBUG_DIR / "latest.png"), annotated)
-                    last_debug_write = now
+                    last_debug_write = debug_now
 
                 elapsed = time.monotonic() - loop_started
                 if elapsed < scan_interval:
