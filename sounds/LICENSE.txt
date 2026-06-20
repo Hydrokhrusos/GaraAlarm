@@ -1,0 +1,36 @@
+Sophia Voice Assets — generated with ElevenLabs (elevenlabs.io)
+================================================================
+
+This file applies only to these audio assets in the `sophia` branch:
+
+- splinter_storm.wav
+- splinter_storm_urgent.wav
+- roar.wav
+
+These three files are NOT covered by the repository's MIT License. The source
+code and other files remain licensed as stated in the root LICENSE.txt unless a
+file says otherwise.
+
+Generation and attribution
+--------------------------
+
+Service: ElevenLabs (elevenlabs.io / 11.ai)
+Voice: Sophia - British, Smooth and Engaging
+Voice ID: jB2lPb5DhAX6l1TLkKXy
+Model: Eleven Multilingual v2
+
+These audio files were generated on an ElevenLabs free plan. Their use and
+redistribution are limited to non-commercial purposes, require attribution to
+ElevenLabs, and remain subject to the applicable ElevenLabs Terms of Service
+and Prohibited Use Policy. This repository does not relicense these files under
+MIT or grant rights beyond those terms.
+
+For the version without these ElevenLabs-generated files, use the `main` branch
+or replace all three files with assets whose license suits your use.
+
+Branch policy
+-------------
+
+Updates may be merged automatically from `main` into `sophia` while these three
+audio files are preserved. Do not merge `sophia` back into `main` unless these
+files and this notice are deliberately removed first.
