@@ -6,8 +6,8 @@ It does **not** press keys, recast abilities, read game memory, inject code, or 
 
 ## Alert behavior
 
-- **Splinter Storm:** warns at **10 seconds** with the regular sound and again urgently at **5 seconds** with a separate urgent sound.
-- **Roar:** gives **no warning while Roar is active**. It calibrates from the stable bottom-right ready/off icon, arms after that icon disappears for 1.8 seconds, then sounds the Roar alarm when the ready/off icon returns. It reminds you every **8 seconds** while Roar stays ready.
+- **Splinter Storm:** warns once at **10 seconds** with the regular sound and once urgently at **5 seconds** with a separate urgent sound.
+- **Roar:** gives **no warning while Roar is active**. It calibrates from the stable bottom-right ready/off icon, arms after that icon disappears for 1.8 seconds, then sounds the Roar alarm once when the ready/off icon returns. If you calibrate Roar's grayed/no-energy icon too, it skips that state and reminds you every **8 seconds** while Roar stays ready, up to **5** alerts per ready cycle.
 
 Roar tracking arms only after the script has first confirmed the ready/off icon, then seen it disappear. This prevents it from yelling in the Orbiter or before your first cast.
 
@@ -29,7 +29,7 @@ https://tesseract-ocr.github.io/tessdoc/Installation.html
 Calibration uses a frozen screenshot from *your* HUD, so custom HUD colors and scale are fine.
 
 1. Enter a mission as Gara with Roar equipped.
-2. Start `calibrate.bat` and choose **all**, **Splinter Storm only**, or **Roar ready/off icon only**.
+2. Start `calibrate.bat` and choose **all**, **Splinter Storm only**, or **Roar ready/no-energy icons only**.
 3. Switch back to Warframe during the countdown, activate **Splinter Storm**, and leave **Roar off/ready**.
 4. At the capture beep, Alt-Tab to the selector if it does not appear in front.
 5. For **Splinter Storm**, select it from the top buff bar:
@@ -37,9 +37,12 @@ Calibration uses a frozen screenshot from *your* HUD, so custom HUD colors and s
    - the icon only, cropped tightly,
    - the timer digits only.
 6. Enter the Splinter Storm timer shown in the enlarged preview.
-7. For **Roar**, select the off/ready icon from the bottom-right ability indicators:
+7. For **Roar**, select the castable off/ready icon from the bottom-right ability indicators:
    - the whole indicator,
    - the icon, cropped tightly.
+8. When prompted, you can also capture Roar's grayed/no-energy state. Switch back to Warframe, make the Roar icon gray because you lack enough energy, then select:
+   - the whole no-energy indicator,
+   - the grayed icon, cropped tightly.
 
 Roar does not need timer calibration or OCR. OpenCV's selector accepts **Enter** or **Space** after dragging the box.
 
@@ -76,6 +79,12 @@ Raise this if brief ready-icon detection misses cause false alarms. Lowering it 
 ```
 
 Set it to `0` for one alert when Roar becomes ready with no repeated reminders.
+
+```json
+"max_inactive_alerts": 5
+```
+
+Set it to `0` for unlimited reminders. Roar skips alarms while its calibrated no-energy icon matches. If that optional template has not been captured, it falls back to the dimmed-icon brightness check.
 
 Restart the alarm after editing.
 
