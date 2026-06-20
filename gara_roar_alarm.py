@@ -3,7 +3,7 @@
 
 This program is deliberately read-only: it captures screen pixels, recognizes two
 user-calibrated buff icons, OCRs Splinter Storm's visible timer, and watches for
-Roar's icon to disappear. It never sends keyboard/mouse/controller input and does
+Roar's ready icon to return. It never sends keyboard/mouse/controller input and does
 not inspect the game process.
 
 Windows is the supported platform because alerts use the built-in ``winsound``
@@ -66,11 +66,12 @@ DEFAULT_BUFFS: dict[str, dict[str, Any]] = {
         "name": "Roar",
         "template": "templates/roar.png",
         "sound": "sounds/roar.wav",
-        "alert_mode": "on_expire",
+        "alert_mode": "on_ready",
         "warnings": [],
         "match_threshold": 0.68,
         "max_reasonable_seconds": 180,
         "missing_grace_seconds": 1.8,
+        "match_mode": "gray_or_edges",
         "presence_confirm_hits": 2,
         "expiry_repeat": 2,
         "inactive_reminder_seconds": 8.0,
@@ -87,6 +88,21 @@ OCR_MODES = (
     "gray:8",
     "adaptive_inv:8",
 )
+
+CALIBRATION_TARGET_ALIASES = {
+    "": "all",
+    "1": "all",
+    "all": "all",
+    "both": "all",
+    "everything": "all",
+    "2": "splinter_storm",
+    "splinter": "splinter_storm",
+    "splinterstorm": "splinter_storm",
+    "splinter_storm": "splinter_storm",
+    "gara": "splinter_storm",
+    "3": "roar",
+    "roar": "roar",
+}
 
 
 class ConfigurationError(RuntimeError):
@@ -133,6 +149,7 @@ class TrackerState:
     pending_refresh_at: float = 0.0
     last_inactive_alert_at: float = 0.0
     presence_seen_streak: int = 0
+    ever_ready: bool = False
 
     def estimate(self, now: Optional[float] = None) -> Optional[float]:
         if self.last_timer is None:
@@ -141,30 +158,57 @@ class TrackerState:
             now = time.monotonic()
         return max(0.0, self.last_timer - max(0.0, now - self.last_ocr_at))
 
-    def mark_seen(self, detection: Detection, now: float) -> None:
+    def mark_seen(self, detection: Detection, now: float) -> Optional[str]:
         self.last_seen_at = now
         self.last_detection = detection
         self.missing_since = None
 
-        # Roar is not recastable while active, so there is no useful early
-        # countdown warning. Its icon being present is enough to mark it active.
+        # Expiry-style icon tracking: presence means the buff is active, and
+        # absence after a grace period means it ended.
         if self.alert_mode == "on_expire":
             self.presence_seen_streak += 1
             if self.presence_seen_streak < max(1, self.presence_confirm_hits):
-                return
+                return None
             was_active = self.active
             self.active = True
             self.ever_active = True
             self.last_timer = None
             if not was_active:
                 self.last_inactive_alert_at = 0.0
+            return None
+
+        # For bottom-right Roar tracking, the calibrated template is the stable
+        # ready/off icon. It should alert when that icon returns after it has
+        # been absent long enough to mean Roar was cast and active.
+        if self.alert_mode == "on_ready":
+            self.presence_seen_streak += 1
+            if self.presence_seen_streak < max(1, self.presence_confirm_hits):
+                return None
+            was_active = self.active
+            self.ever_ready = True
+            self.active = False
+            self.last_timer = None
+            self.pending_refresh_value = None
+            self.pending_refresh_at = 0.0
+            if was_active and self.ever_active:
+                self.last_inactive_alert_at = now
+                return "expired"
+            if self.ever_active and self.inactive_reminder_seconds > 0.0:
+                if self.last_inactive_alert_at <= 0.0:
+                    self.last_inactive_alert_at = now
+                elif now - self.last_inactive_alert_at >= self.inactive_reminder_seconds:
+                    self.last_inactive_alert_at = now
+                    return "reminder"
+            return None
+
+        return None
 
     def mark_missing(self, now: float) -> Optional[str]:
-        """Return ``expired`` or ``reminder`` for an expiry-only buff.
+        """Return ``expired`` or ``reminder`` for icon-only buff modes.
 
-        A short grace period filters single-frame template misses. The tracker
-        only arms after it has actually seen the icon, so it will not nag in the
-        Orbiter or before the first Roar cast.
+        A short grace period filters single-frame template misses. For Roar's
+        ready-icon mode, absence only arms the tracker after the ready/off icon
+        has first been confirmed visible.
         """
         if self.missing_since is None:
             self.missing_since = now
@@ -173,6 +217,18 @@ class TrackerState:
             return None
 
         self.last_detection = None
+        if self.alert_mode == "on_ready":
+            if not self.ever_ready:
+                return None
+            if not self.active:
+                self.active = True
+                self.ever_active = True
+                self.last_timer = None
+                self.pending_refresh_value = None
+                self.pending_refresh_at = 0.0
+                self.last_inactive_alert_at = 0.0
+            return None
+
         if self.active:
             self.active = False
             self.last_timer = None
@@ -335,13 +391,21 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Read Splinter Storm's timer from the visible Warframe HUD, "
-            "warn before it expires, and alert when Roar's icon disappears."
+            "warn before it expires, and alert when Roar's ready icon returns."
         )
     )
     parser.add_argument(
         "--calibrate",
         action="store_true",
         help="capture your HUD and create icon/timer calibration",
+    )
+    parser.add_argument(
+        "--calibrate-buff",
+        default=None,
+        help=(
+            "which calibration to refresh: all, splinter_storm, or roar "
+            "(calibration prompts when omitted)"
+        ),
     )
     parser.add_argument(
         "--monitor",
@@ -353,7 +417,7 @@ def parse_args() -> argparse.Namespace:
         "--capture-delay",
         type=int,
         default=9,
-        help="seconds to switch to Warframe and activate both buffs during calibration",
+        help="seconds to switch to Warframe and prepare the selected calibration target",
     )
     parser.add_argument(
         "--ignore-focus",
@@ -427,18 +491,109 @@ def choose_monitor(monitors: list[dict[str, int]], requested: Optional[int]) -> 
         print("Choose one of the numbered physical monitors, not 0/all monitors.")
 
 
-def default_search_box(monitor: dict[str, int]) -> dict[str, int]:
-    """Broad top-right HUD area, relative to the chosen monitor."""
+def clamp_relative_box(
+    box: dict[str, int], monitor: dict[str, int]
+) -> dict[str, int]:
+    monitor_width = int(monitor["width"])
+    monitor_height = int(monitor["height"])
+    left = min(max(0, int(box["left"])), max(0, monitor_width - 1))
+    top = min(max(0, int(box["top"])), max(0, monitor_height - 1))
+    width = min(max(1, int(box["width"])), monitor_width - left)
+    height = min(max(1, int(box["height"])), monitor_height - top)
+    return {"left": left, "top": top, "width": width, "height": height}
+
+
+def full_monitor_box(monitor: dict[str, int]) -> dict[str, int]:
+    return {
+        "left": 0,
+        "top": 0,
+        "width": int(monitor["width"]),
+        "height": int(monitor["height"]),
+    }
+
+
+def default_splinter_storm_search_box(monitor: dict[str, int]) -> dict[str, int]:
+    """Full-width top HUD band so buff-bar ordering can drift safely."""
     width = monitor["width"]
     height = monitor["height"]
-    left = int(width * 0.38)
-    top = 0
+    return clamp_relative_box(
+        {
+            "left": 0,
+            "top": 0,
+            "width": width,
+            "height": max(320, int(height * 0.50)),
+        },
+        monitor,
+    )
+
+
+def default_roar_search_box(monitor: dict[str, int]) -> dict[str, int]:
+    """Bottom-right ability HUD area used for Roar indicator tracking."""
+    width = monitor["width"]
+    height = monitor["height"]
+    box_width = max(520, int(width * 0.50))
+    box_height = max(360, int(height * 0.50))
+    return clamp_relative_box(
+        {
+            "left": width - box_width,
+            "top": height - box_height,
+            "width": box_width,
+            "height": box_height,
+        },
+        monitor,
+    )
+
+
+def default_search_boxes(monitor: dict[str, int]) -> dict[str, dict[str, int]]:
     return {
-        "left": left,
-        "top": top,
-        "width": width - left,
-        "height": max(240, int(height * 0.42)),
+        "splinter_storm": default_splinter_storm_search_box(monitor),
+        "roar": default_roar_search_box(monitor),
     }
+
+
+def default_search_box(monitor: dict[str, int]) -> dict[str, int]:
+    """Backward-compatible alias for Splinter Storm's top HUD band."""
+    return default_splinter_storm_search_box(monitor)
+
+
+def coerce_search_box(value: Any, label: str) -> dict[str, int]:
+    if not isinstance(value, dict):
+        raise ConfigurationError(f"{label} must be an object with left/top/width/height.")
+    try:
+        box = {
+            "left": int(value["left"]),
+            "top": int(value["top"]),
+            "width": int(value["width"]),
+            "height": int(value["height"]),
+        }
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            f"{label} must contain integer left/top/width/height values."
+        ) from exc
+    if box["width"] <= 0 or box["height"] <= 0:
+        raise ConfigurationError(f"{label} width and height must be positive.")
+    return box
+
+
+def search_boxes_for_config(config: dict[str, Any]) -> dict[str, dict[str, int]]:
+    configured_boxes = config.get("search_boxes", {})
+    fallback = config.get("search_box")
+    if configured_boxes is not None and not isinstance(configured_boxes, dict):
+        raise ConfigurationError("search_boxes must be an object when present.")
+
+    result: dict[str, dict[str, int]] = {}
+    for key in config.get("buffs", {}):
+        configured = (
+            configured_boxes.get(key) if isinstance(configured_boxes, dict) else None
+        )
+        if configured is None:
+            configured = fallback
+        if configured is None:
+            raise ConfigurationError(
+                f"Calibration is missing a search box for {key!r}; recalibrate."
+            )
+        result[key] = coerce_search_box(configured, f"search box for {key}")
+    return result
 
 
 def absolute_capture_box(
@@ -771,11 +926,9 @@ def read_timer(
     return choose_ocr_result(suspicious, expected, max_reasonable)
 
 
-def locate_template(search: np.ndarray, template: np.ndarray) -> Optional[Detection]:
-    if search.size == 0 or template.size == 0:
-        return None
-    search_gray = cv2.cvtColor(search, cv2.COLOR_BGR2GRAY)
-    template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+def template_detection(
+    search_gray: np.ndarray, template_gray: np.ndarray
+) -> Optional[Detection]:
     template_height, template_width = template_gray.shape[:2]
     if template_height > search_gray.shape[0] or template_width > search_gray.shape[1]:
         return None
@@ -788,6 +941,34 @@ def locate_template(search: np.ndarray, template: np.ndarray) -> Optional[Detect
         height=int(template_height),
         score=float(max_value),
     )
+
+
+def edge_map(gray: np.ndarray) -> np.ndarray:
+    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+    return cv2.Canny(blurred, 40, 120)
+
+
+def locate_template(
+    search: np.ndarray, template: np.ndarray, match_mode: str = "gray"
+) -> Optional[Detection]:
+    if search.size == 0 or template.size == 0:
+        return None
+    search_gray = cv2.cvtColor(search, cv2.COLOR_BGR2GRAY)
+    template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+    best = template_detection(search_gray, template_gray)
+    if match_mode != "gray_or_edges":
+        return best
+
+    template_edges = edge_map(template_gray)
+    if int(np.count_nonzero(template_edges)) < 8:
+        return best
+    search_edges = edge_map(search_gray)
+    edge_detection = template_detection(search_edges, template_edges)
+    if edge_detection is not None and (
+        best is None or edge_detection.score > best.score
+    ):
+        return edge_detection
+    return best
 
 
 def safe_timer_crop(
@@ -836,9 +1017,12 @@ def load_config() -> dict[str, Any]:
         raise ConfigurationError(f"Could not read {CONFIG_PATH.name}: {exc}") from exc
     if config.get("version") != CONFIG_VERSION:
         raise ConfigurationError("Calibration version is unsupported; recalibrate.")
-    for required in ("monitor", "monitor_geometry", "search_box", "buffs"):
+    for required in ("monitor", "monitor_geometry", "buffs"):
         if required not in config:
             raise ConfigurationError(f"Calibration is missing '{required}'; recalibrate.")
+    if "search_box" not in config and "search_boxes" not in config:
+        raise ConfigurationError("Calibration is missing search boxes; recalibrate.")
+    search_boxes_for_config(config)
     return config
 
 
@@ -887,9 +1071,14 @@ def calibrate_buff(
     while True:
         try:
             tile_description = "icon and timer" if needs_timer else "icon"
+            tile_subject = (
+                f"bottom-right {name} ready/off indicator"
+                if key == "roar"
+                else f"{name} top buff tile"
+            )
             tile_roi = select_roi(
                 frame,
-                f"STEP 1 — Select the whole {name} buff tile ({tile_description})",
+                f"STEP 1 - Select the whole {tile_subject} ({tile_description})",
                 max_upscale=1.6,
             )
             tile_roi = padded_roi(tile_roi, 8, frame.shape[1], frame.shape[0])
@@ -943,6 +1132,7 @@ def calibrate_buff(
             "alert_mode": alert_mode,
             "warnings": list(defaults.get("warnings", [])),
             "match_threshold": float(defaults["match_threshold"]),
+            "match_mode": str(defaults.get("match_mode", "gray")),
             "max_reasonable_seconds": float(defaults["max_reasonable_seconds"]),
             "missing_grace_seconds": float(
                 defaults.get("missing_grace_seconds", 2.2)
@@ -957,9 +1147,8 @@ def calibrate_buff(
             ),
         }
 
-        # Roar is deliberately icon-only. Its alert fires after the icon has
-        # disappeared for the configured grace period, meaning the buff is no
-        # longer active and the ability can actually be recast.
+        # Roar is deliberately icon-only. It uses the stable bottom-right
+        # ready/off icon and alerts when that icon returns after a cast.
         if not needs_timer:
             print(f"{name}: icon calibrated; no timer OCR is used for this buff.")
             return buff_config
@@ -1029,23 +1218,142 @@ def beep_capture_complete() -> None:
             pass
 
 
+def normalize_calibration_target(raw: Optional[str]) -> str:
+    if raw is None:
+        raise ConfigurationError("No calibration target was provided.")
+    key = raw.strip().lower().replace("-", "_").replace(" ", "_")
+    key = key.replace("__", "_")
+    target = CALIBRATION_TARGET_ALIASES.get(key)
+    if target is None:
+        raise ConfigurationError(
+            "Calibration target must be all, splinter_storm, or roar."
+        )
+    return target
+
+
+def choose_calibration_target(raw: Optional[str]) -> str:
+    if raw is not None:
+        return normalize_calibration_target(raw)
+
+    print("\nWhat do you want to recalibrate?")
+    print("  1. all")
+    print("  2. Splinter Storm only")
+    print("  3. Roar ready/off icon only")
+    while True:
+        choice = input("Choose [1/all]: ").strip()
+        try:
+            return normalize_calibration_target(choice)
+        except ConfigurationError as exc:
+            print(exc)
+
+
+def calibration_keys_for_target(target: str) -> list[str]:
+    if target == "all":
+        return list(DEFAULT_BUFFS)
+    return [target]
+
+
+def calibration_defaults(
+    key: str, existing_config: Optional[dict[str, Any]]
+) -> dict[str, Any]:
+    defaults = dict(DEFAULT_BUFFS[key])
+    if existing_config is not None:
+        existing_buffs = existing_config.get("buffs", {})
+        existing = existing_buffs.get(key) if isinstance(existing_buffs, dict) else None
+        if isinstance(existing, dict):
+            defaults.update(existing)
+    if key == "roar":
+        defaults["alert_mode"] = "on_ready"
+        defaults["warnings"] = []
+        defaults.setdefault("match_mode", "gray_or_edges")
+    return defaults
+
+
+def monitor_for_calibration(
+    monitors: list[dict[str, int]],
+    requested: Optional[int],
+    existing_config: Optional[dict[str, Any]],
+    partial: bool,
+) -> int:
+    if requested is not None:
+        return choose_monitor(monitors, requested)
+    if existing_config is not None:
+        monitor_index = int(existing_config["monitor"])
+        if monitor_index <= 0 or monitor_index >= len(monitors):
+            raise ConfigurationError(
+                "The calibrated monitor no longer exists; run full calibration."
+            )
+        if partial:
+            verify_monitor_geometry(existing_config["monitor_geometry"], monitors[monitor_index])
+        return monitor_index
+    return choose_monitor(monitors, None)
+
+
+def calibration_instructions(keys: list[str]) -> str:
+    prep: list[str] = []
+    if "splinter_storm" in keys:
+        prep.append("activate Splinter Storm")
+    if "roar" in keys:
+        prep.append("leave Roar off/ready")
+    if len(prep) == 1:
+        action = prep[0]
+    else:
+        action = ", ".join(prep[:-1]) + ", and " + prep[-1]
+
+    capture_parts: list[str] = []
+    if "splinter_storm" in keys:
+        capture_parts.append("the full top buff bar for Splinter Storm")
+    if "roar" in keys:
+        capture_parts.append("the bottom-right ready icon for Roar")
+    if len(capture_parts) == 1:
+        capture_text = capture_parts[0]
+    else:
+        capture_text = ", and ".join(capture_parts)
+
+    return (
+        "\nBefore the countdown:\n"
+        "  - Set Warframe to Borderless Fullscreen or Windowed.\n"
+        "  - Enter a mission as Gara with Roar equipped.\n"
+        "  - Keep your HUD scale and resolution at the values you normally use.\n"
+        f"\nAfter pressing Enter, switch to Warframe, {action}. "
+        f"The script will capture {capture_text}."
+    )
+
+
 def run_calibration(args: argparse.Namespace) -> None:
     print(f"\n=== {APP_NAME}: calibration ===")
-    executable = configure_tesseract("")
+    target = choose_calibration_target(args.calibrate_buff)
+    calibration_keys = calibration_keys_for_target(target)
+    partial = target != "all"
+
+    existing_config: Optional[dict[str, Any]] = None
+    if CONFIG_PATH.is_file():
+        try:
+            existing_config = load_config()
+        except ConfigurationError:
+            if partial:
+                raise
+            existing_config = None
+    elif partial:
+        raise ConfigurationError(
+            "Partial calibration needs an existing config.json. Choose all first."
+        )
+
+    executable = configure_tesseract(
+        "" if existing_config is None else str(existing_config.get("tesseract_cmd", ""))
+    )
     print(f"Tesseract: {executable}")
     monitors = list_monitors()
-    monitor_index = choose_monitor(monitors, args.monitor)
-    monitor = monitors[monitor_index]
-    search_box = default_search_box(monitor)
-
-    print(
-        "\nBefore the countdown:\n"
-        "  • Set Warframe to Borderless Fullscreen or Windowed.\n"
-        "  • Enter a mission as Gara with Roar equipped.\n"
-        "  • Keep your HUD scale and resolution at the values you normally use.\n"
-        "\nAfter pressing Enter, switch to Warframe and activate BOTH Splinter Storm "
-        "and Roar. The script will capture the top-right HUD automatically."
+    monitor_index = monitor_for_calibration(
+        monitors,
+        args.monitor,
+        existing_config,
+        partial,
     )
+    monitor = monitors[monitor_index]
+    search_boxes = default_search_boxes(monitor)
+
+    print(calibration_instructions(calibration_keys))
     input("Press Enter to begin the countdown...")
     delay = max(3, int(args.capture_delay))
     for remaining in range(delay, 0, -1):
@@ -1054,26 +1362,55 @@ def run_calibration(args: argparse.Namespace) -> None:
     print("Capturing now!          ")
 
     with mss.mss() as sct:
-        frame = grab_bgr(sct, monitor, search_box)
+        calibration_frames = {
+            key: grab_bgr(sct, monitor, search_boxes[key])
+            for key in calibration_keys
+        }
     beep_capture_complete()
     print("Screenshot frozen. Alt-Tab back to the selector windows if needed.")
 
     TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
-    buff_configs: dict[str, Any] = {}
-    for key, defaults in DEFAULT_BUFFS.items():
-        buff_configs[key] = calibrate_buff(frame, key, defaults)
+    if existing_config is None:
+        buff_configs: dict[str, Any] = {}
+    else:
+        buff_configs = dict(existing_config.get("buffs", {}))
 
-    config: dict[str, Any] = {
-        "version": CONFIG_VERSION,
-        "monitor": monitor_index,
-        "monitor_geometry": monitor,
-        "search_box": search_box,
-        "scan_interval_seconds": 0.45,
-        "ocr_interval_seconds": 0.72,
-        "only_when_warframe_focused": True,
-        "tesseract_cmd": str(executable),
-        "buffs": buff_configs,
-    }
+    if partial:
+        missing = [
+            key
+            for key in DEFAULT_BUFFS
+            if key not in buff_configs and key not in calibration_keys
+        ]
+        if missing:
+            names = ", ".join(DEFAULT_BUFFS[key]["name"] for key in missing)
+            raise ConfigurationError(
+                f"Existing calibration is missing {names}; choose all calibration."
+            )
+
+    for key in calibration_keys:
+        defaults = calibration_defaults(key, existing_config)
+        buff_configs[key] = calibrate_buff(calibration_frames[key], key, defaults)
+
+    if isinstance(buff_configs.get("roar"), dict):
+        buff_configs["roar"]["alert_mode"] = "on_ready"
+        buff_configs["roar"]["warnings"] = []
+        buff_configs["roar"].setdefault("match_mode", "gray_or_edges")
+
+    config: dict[str, Any] = dict(existing_config or {})
+    config.update(
+        {
+            "version": CONFIG_VERSION,
+            "monitor": monitor_index,
+            "monitor_geometry": monitor,
+            "search_box": search_boxes["splinter_storm"],
+            "search_boxes": search_boxes,
+            "tesseract_cmd": str(executable),
+            "buffs": buff_configs,
+        }
+    )
+    config.setdefault("scan_interval_seconds", 0.45)
+    config.setdefault("ocr_interval_seconds", 0.72)
+    config.setdefault("only_when_warframe_focused", True)
     save_config(config)
     print(f"\nCalibration saved to {CONFIG_PATH}")
     print("Run start_alarm.bat. Keep this folder together; config uses relative paths.")
@@ -1104,13 +1441,14 @@ def build_runtime(
         warnings = [float(value) for value in buff.get("warnings", [])]
 
         # Backward compatibility: old configs had Roar warning thresholds and
-        # timer coordinates. They are ignored; no recalibration is required.
-        default_mode = "on_expire" if key == "roar" else "thresholds"
+        # timer coordinates. They are ignored; Roar now uses the stable
+        # bottom-right ready/off icon and alerts when that icon returns.
+        default_mode = "on_ready" if key == "roar" else "thresholds"
         alert_mode = str(buff.get("alert_mode", default_mode))
         if key == "roar":
-            alert_mode = "on_expire"
+            alert_mode = "on_ready"
             warnings = []
-        if alert_mode not in {"thresholds", "on_expire"}:
+        if alert_mode not in {"thresholds", "on_expire", "on_ready"}:
             raise ConfigurationError(
                 f"Unsupported alert_mode {alert_mode!r} for {buff.get('name', key)}."
             )
@@ -1126,7 +1464,7 @@ def build_runtime(
                 float(
                     buff.get(
                         "missing_grace_seconds",
-                        1.8 if alert_mode == "on_expire" else 2.2,
+                        1.8 if alert_mode in {"on_expire", "on_ready"} else 2.2,
                     )
                 ),
             ),
@@ -1135,7 +1473,7 @@ def build_runtime(
                 float(
                     buff.get(
                         "inactive_reminder_seconds",
-                        8.0 if alert_mode == "on_expire" else 0.0,
+                        8.0 if alert_mode in {"on_expire", "on_ready"} else 0.0,
                     )
                 ),
             ),
@@ -1154,12 +1492,27 @@ def debug_annotate(
     now: float,
 ) -> np.ndarray:
     annotated = frame.copy()
+    search_boxes = search_boxes_for_config(config)
     for key, state in states.items():
+        search_box = search_boxes[key]
+        search_left = int(search_box["left"])
+        search_top = int(search_box["top"])
+        search_width = int(search_box["width"])
+        search_height = int(search_box["height"])
+        cv2.rectangle(
+            annotated,
+            (search_left, search_top),
+            (search_left + search_width, search_top + search_height),
+            (90, 90, 90),
+            1,
+        )
+
         detection = state.last_detection
         if detection is None:
             continue
         buff = config["buffs"][key]
-        x1, y1 = detection.x, detection.y
+        x1 = search_left + detection.x
+        y1 = search_top + detection.y
         x2, y2 = x1 + detection.width, y1 + detection.height
         cv2.rectangle(annotated, (x1, y1), (x2, y2), (255, 255, 255), 1)
 
@@ -1167,8 +1520,8 @@ def debug_annotate(
             offset = buff.get("timer_offset")
             size = buff.get("timer_size")
             if offset is not None and size is not None:
-                tx1 = x1 + int(offset["x"])
-                ty1 = y1 + int(offset["y"])
+                tx1 = search_left + detection.x + int(offset["x"])
+                ty1 = search_top + detection.y + int(offset["y"])
                 tx2 = tx1 + int(size["width"])
                 ty2 = ty1 + int(size["height"])
                 cv2.rectangle(
@@ -1176,6 +1529,8 @@ def debug_annotate(
                 )
             estimate = state.estimate(now)
             state_text = "?" if estimate is None else f"{estimate:.1f}s"
+        elif state.alert_mode == "on_ready":
+            state_text = "READY"
         else:
             state_text = "ACTIVE"
 
@@ -1212,6 +1567,19 @@ def status_text(
                 parts.append(f"{state.name}: --")
             continue
 
+        if state.alert_mode == "on_ready":
+            if state.last_detection is not None:
+                parts.append(
+                    f"{state.name}: READY [{state.last_detection.score:.2f}]"
+                )
+            elif state.active:
+                parts.append(f"{state.name}: ACTIVE")
+            elif state.ever_active:
+                parts.append(f"{state.name}: READY")
+            else:
+                parts.append(f"{state.name}: --")
+            continue
+
         if state.last_detection is None or not state.active:
             parts.append(f"{state.name}: --")
             continue
@@ -1241,6 +1609,16 @@ def run_sound_test(config: dict[str, Any]) -> None:
         worker.close()
 
 
+def alert_text(state: TrackerState, event: str) -> str:
+    if event == "expired":
+        if state.alert_mode == "on_ready":
+            return f"{state.name} ready - recast now"
+        return f"{state.name} ended - recast now"
+    if state.alert_mode == "on_ready":
+        return f"{state.name} is still ready - recast it"
+    return f"{state.name} is still down - recast it"
+
+
 def run_monitor(args: argparse.Namespace) -> None:
     config = load_config()
     executable = configure_tesseract(str(config.get("tesseract_cmd", "")))
@@ -1258,6 +1636,7 @@ def run_monitor(args: argparse.Namespace) -> None:
         return
 
     templates, states = build_runtime(config)
+    search_boxes = search_boxes_for_config(config)
     sound_worker = SoundWorker()
     scan_interval = max(0.15, float(config.get("scan_interval_seconds", 0.45)))
     ocr_interval = max(0.35, float(config.get("ocr_interval_seconds", 0.72)))
@@ -1268,7 +1647,7 @@ def run_monitor(args: argparse.Namespace) -> None:
 
     print(
         "\nMonitoring visible HUD pixels only. Ctrl+C stops the alarm.\n"
-        "Splinter Storm warns before expiry; Roar alerts after its icon disappears."
+        "Splinter Storm warns before expiry; Roar alerts when its ready icon returns."
     )
     try:
         with mss.mss() as sct:
@@ -1281,11 +1660,20 @@ def run_monitor(args: argparse.Namespace) -> None:
                     time.sleep(0.35)
                     continue
 
-                frame = grab_bgr(sct, monitor, config["search_box"])
                 now = time.monotonic()
                 for key, state in states.items():
                     buff = config["buffs"][key]
-                    detection = locate_template(frame, templates[key])
+                    frame = grab_bgr(sct, monitor, search_boxes[key])
+                    detection = locate_template(
+                        frame,
+                        templates[key],
+                        str(
+                            buff.get(
+                                "match_mode",
+                                "gray_or_edges" if key == "roar" else "gray",
+                            )
+                        ),
+                    )
                     threshold = float(buff.get("match_threshold", 0.68))
                     if detection is None or detection.score < threshold:
                         event = state.mark_missing(now)
@@ -1304,11 +1692,23 @@ def run_monitor(args: argparse.Namespace) -> None:
                             sound_worker.play(sound_path, repeat, state.name)
                         continue
 
-                    state.mark_seen(detection, now)
+                    event = state.mark_seen(detection, now)
+                    if event is not None:
+                        sound_path = BASE_DIR / str(buff["sound"])
+                        if event == "expired":
+                            repeat = max(1, int(buff.get("expiry_repeat", 2)))
+                        else:
+                            repeat = max(
+                                1,
+                                int(buff.get("inactive_reminder_repeat", 1)),
+                            )
+                        message = alert_text(state, event)
+                        print(f"\n[ALERT] {message}")
+                        sound_worker.play(sound_path, repeat, state.name)
 
-                    # Roar is deliberately icon-only. We do not OCR its timer or
-                    # warn while it is still active, because it cannot be recast.
-                    if state.alert_mode == "on_expire":
+                    # Roar is deliberately icon-only. We do not OCR its timer;
+                    # the bottom-right ready icon tells us when it can be recast.
+                    if state.alert_mode in {"on_expire", "on_ready"}:
                         continue
 
                     if now - last_ocr_attempt[key] < ocr_interval:
@@ -1356,6 +1756,7 @@ def run_monitor(args: argparse.Namespace) -> None:
 
                 if args.debug and now - last_debug_write >= 1.0:
                     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+                    frame = grab_bgr(sct, monitor, full_monitor_box(monitor))
                     annotated = debug_annotate(frame, states, config, now)
                     cv2.imwrite(str(DEBUG_DIR / "latest.png"), annotated)
                     last_debug_write = now

@@ -1,15 +1,15 @@
 # Gara + Roar HUD Alarm 🔔
 
-A read-only Windows companion for **Warframe**. It watches the visible top-right HUD, OCRs the real **Splinter Storm** timer, and detects whether the **Roar** buff icon is present.
+A read-only Windows companion for **Warframe**. It watches the full visible top buff bar for the real **Splinter Storm** timer, and watches the bottom-right **Roar** ready/off ability icon.
 
 It does **not** press keys, recast abilities, read game memory, inject code, or inspect network traffic.
 
 ## Alert behavior
 
 - **Splinter Storm:** warns at **10 seconds** and again urgently at **5 seconds** remaining.
-- **Roar:** gives **no warning while Roar is active**. Once the icon has been continuously absent for 1.8 seconds, it sounds the Roar alarm twice. It then reminds you every **8 seconds** until the icon returns.
+- **Roar:** gives **no warning while Roar is active**. It calibrates from the stable bottom-right ready/off icon, arms after that icon disappears for 1.8 seconds, then sounds the Roar alarm when the ready/off icon returns. It reminds you every **8 seconds** while Roar stays ready.
 
-Roar tracking arms only after the script has seen Roar active at least once. This prevents it from yelling in the Orbiter or before your first cast.
+Roar tracking arms only after the script has first confirmed the ready/off icon, then seen it disappear. This prevents it from yelling in the Orbiter or before your first cast.
 
 ## Install
 
@@ -18,7 +18,7 @@ Roar tracking arms only after the script has seen Roar active at least once. Thi
 3. Install **Tesseract OCR 5**. Its usual Windows path is:
    `C:\Program Files\Tesseract-OCR\tesseract.exe`
 4. Double-click **`setup_windows.bat`**.
-5. Double-click **`calibrate.bat`**.
+5. Double-click **`calibrate.bat`** and choose what to calibrate.
 6. After calibration, double-click **`start_alarm.bat`** whenever you play Gara.
 
 Official Tesseract installation notes:
@@ -29,23 +29,25 @@ https://tesseract-ocr.github.io/tessdoc/Installation.html
 Calibration uses a frozen screenshot from *your* HUD, so custom HUD colors and scale are fine.
 
 1. Enter a mission as Gara with Roar equipped.
-2. Start `calibrate.bat` and press Enter when prompted.
-3. Switch back to Warframe during the countdown and activate **both Splinter Storm and Roar**.
+2. Start `calibrate.bat` and choose **all**, **Splinter Storm only**, or **Roar ready/off icon only**.
+3. Switch back to Warframe during the countdown, activate **Splinter Storm**, and leave **Roar off/ready**.
 4. At the capture beep, Alt-Tab to the selector if it does not appear in front.
-5. For **Splinter Storm**, select:
+5. For **Splinter Storm**, select it from the top buff bar:
    - the whole buff tile,
    - the icon only, cropped tightly,
    - the timer digits only.
 6. Enter the Splinter Storm timer shown in the enlarged preview.
-7. For **Roar**, select only:
-   - the whole buff tile,
+7. For **Roar**, select the off/ready icon from the bottom-right ability indicators:
+   - the whole indicator,
    - the icon, cropped tightly.
 
 Roar does not need timer calibration or OCR. OpenCV's selector accepts **Enter** or **Space** after dragging the box.
 
+You can refresh just one target later. Recalibrating Roar only leaves Splinter Storm's template and timer crop alone; recalibrating Splinter Storm only leaves Roar alone.
+
 ## Existing calibration
 
-An older `config.json` still works. The updated script forces Roar into expiry-only mode and ignores its old warning thresholds and timer coordinates, so you do **not** need to recalibrate merely to get the new behavior.
+An older `config.json` still loads, but to use the bottom-right Roar ready/off icon you should rerun `calibrate.bat` with Roar uncast. Old Roar templates cropped from the top buff bar or from an active Roar state usually will not match the ready/off indicator.
 
 ## Adjust the behavior
 
@@ -59,13 +61,13 @@ After calibration, open `config.json`.
 
 The first value is the early warning; the smaller value is urgent and repeats the sound.
 
-### Roar expiry confirmation delay
+### Roar cast confirmation delay
 
 ```json
 "missing_grace_seconds": 1.8
 ```
 
-Raise this if brief icon-detection misses cause false alarms. Lowering it makes the expiry alert faster but more sensitive.
+Raise this if brief ready-icon detection misses cause false alarms. Lowering it makes the script arm faster after you cast Roar, but also makes it more sensitive to single detection misses.
 
 ### Roar repeated reminder interval
 
@@ -73,7 +75,7 @@ Raise this if brief icon-detection misses cause false alarms. Lowering it makes 
 "inactive_reminder_seconds": 8.0
 ```
 
-Set it to `0` for one alert at expiry with no repeated reminders.
+Set it to `0` for one alert when Roar becomes ready with no repeated reminders.
 
 Restart the alarm after editing.
 
@@ -83,9 +85,11 @@ Restart the alarm after editing.
 
 Re-run calibration and select only the visible digits—not the icon, percentage, label, or surrounding space. A little padding is okay, but a huge box makes OCR worse.
 
-### Roar produces a false expiry alarm
+### Roar produces a false ready alarm
 
-Raise Roar's `missing_grace_seconds` from `1.8` to `2.5` or slightly lower its `match_threshold` if the icon is genuinely visible but not detected.
+Raise Roar's `missing_grace_seconds` from `1.8` to `2.5` if brief misses arm the tracker while Roar is already ready. Slightly lower `match_threshold` if the ready/off icon is genuinely visible but not detected.
+
+Roar uses a shape-aware match mode so the ready/off icon can still match if it is blue-highlighted as the last ability you cast.
 
 ### Detection score is below about `0.68`
 
@@ -113,7 +117,7 @@ By default it only scans while a window containing `Warframe` in its title is fo
 
 ### I need diagnostics
 
-Run `start_alarm_debug.bat`. It writes `debug\latest.png` plus the Splinter Storm timer crop so you can inspect what the script detected. Debug images may contain whatever was visible in the captured top-right HUD region.
+Run `start_alarm_debug.bat`. It writes `debug\latest.png` plus the Splinter Storm timer crop so you can inspect what the script detected. Debug images may contain the visible Warframe HUD regions being scanned.
 
 ## Important Warframe policy note
 

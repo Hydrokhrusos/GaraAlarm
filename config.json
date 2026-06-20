@@ -8,10 +8,24 @@
     "height": 1440
   },
   "search_box": {
-    "left": 972,
+    "left": 0,
     "top": 0,
-    "width": 1588,
-    "height": 604
+    "width": 2560,
+    "height": 720
+  },
+  "search_boxes": {
+    "splinter_storm": {
+      "left": 0,
+      "top": 0,
+      "width": 2560,
+      "height": 720
+    },
+    "roar": {
+      "left": 1280,
+      "top": 720,
+      "width": 1280,
+      "height": 720
+    }
   },
   "scan_interval_seconds": 0.45,
   "ocr_interval_seconds": 0.72,
@@ -35,12 +49,12 @@
       "inactive_reminder_seconds": 0.0,
       "inactive_reminder_repeat": 1,
       "timer_offset": {
-        "x": -1,
+        "x": -6,
         "y": 53
       },
       "timer_size": {
-        "width": 60,
-        "height": 33
+        "width": 61,
+        "height": 32
       },
       "ocr_mode": "otsu_inv:8"
     },
@@ -48,9 +62,10 @@
       "name": "Roar",
       "template": "templates/roar.png",
       "sound": "sounds/roar.wav",
-      "alert_mode": "on_expire",
+      "alert_mode": "on_ready",
       "warnings": [],
       "match_threshold": 0.68,
+      "match_mode": "gray_or_edges",
       "max_reasonable_seconds": 180.0,
       "missing_grace_seconds": 1.8,
       "presence_confirm_hits": 2,
