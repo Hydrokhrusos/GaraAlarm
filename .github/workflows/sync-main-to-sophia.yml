@@ -1,0 +1,102 @@
+name: Sync main into Sophia variant
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-main-to-sophia
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Merge main into sophia while preserving Sophia audio
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the Sophia branch
+        uses: actions/checkout@v4
+        with:
+          ref: sophia
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Back up the Sophia-only audio files
+        shell: bash
+        run: |
+          set -euo pipefail
+          backup="$RUNNER_TEMP/sophia-audio"
+          mkdir -p "$backup"
+
+          for file in \
+            sounds/splinter_storm.wav \
+            sounds/splinter_storm_urgent.wav \
+            sounds/roar.wav
+          do
+            test -f "$file"
+            cp -- "$file" "$backup/$(basename "$file")"
+          done
+
+          (
+            cd "$backup"
+            sha256sum *.wav > SHA256SUMS
+          )
+
+      - name: Merge main and restore the Sophia audio before committing
+        shell: bash
+        run: |
+          set -euo pipefail
+          backup="$RUNNER_TEMP/sophia-audio"
+
+          git fetch origin main
+
+          merge_status=0
+          git merge --no-ff --no-commit origin/main || merge_status=$?
+
+          if [ "$merge_status" -ne 0 ] && [ ! -f .git/MERGE_HEAD ]; then
+            echo "The merge failed before Git created a merge state."
+            exit "$merge_status"
+          fi
+
+          cp -- "$backup/splinter_storm.wav" sounds/splinter_storm.wav
+          cp -- "$backup/splinter_storm_urgent.wav" sounds/splinter_storm_urgent.wav
+          cp -- "$backup/roar.wav" sounds/roar.wav
+          git add -- \
+            sounds/splinter_storm.wav \
+            sounds/splinter_storm_urgent.wav \
+            sounds/roar.wav
+
+          unresolved="$(git diff --name-only --diff-filter=U)"
+          if [ -n "$unresolved" ]; then
+            echo "Merge conflicts remain outside the three protected Sophia audio files:"
+            printf '%s\n' "$unresolved"
+            git merge --abort
+            exit 1
+          fi
+
+          (
+            cd "$backup"
+            sha256sum -c SHA256SUMS
+          )
+
+          test "$(sha256sum sounds/splinter_storm.wav | cut -d' ' -f1)" = "$(sha256sum "$backup/splinter_storm.wav" | cut -d' ' -f1)"
+          test "$(sha256sum sounds/splinter_storm_urgent.wav | cut -d' ' -f1)" = "$(sha256sum "$backup/splinter_storm_urgent.wav" | cut -d' ' -f1)"
+          test "$(sha256sum sounds/roar.wav | cut -d' ' -f1)" = "$(sha256sum "$backup/roar.wav" | cut -d' ' -f1)"
+
+          if [ -f .git/MERGE_HEAD ]; then
+            git commit -m "Merge main into sophia (preserve Sophia voice assets)"
+          else
+            echo "Sophia is already up to date with main."
+          fi
+
+      - name: Push the updated Sophia branch
+        run: git push origin HEAD:sophia
