@@ -182,6 +182,39 @@ class TrackerState:
             now = time.monotonic()
         return max(0.0, self.last_timer - max(0.0, now - self.last_ocr_at))
 
+    def _trigger_thresholds_at(self, value: float) -> tuple[Optional[float], bool]:
+        if self.alert_mode != "thresholds":
+            return None, False
+
+        warnings_desc = sorted(set(self.warnings), reverse=True)
+        if not warnings_desc:
+            return None, False
+
+        crossed = [
+            threshold
+            for threshold in warnings_desc
+            if threshold not in self.fired and value <= threshold
+        ]
+        if not crossed:
+            return None, False
+
+        chosen = min(crossed)  # Most urgent threshold reached.
+        for threshold in warnings_desc:
+            if value <= threshold:
+                self.fired.add(threshold)
+        urgent = chosen == min(warnings_desc)
+        return chosen, urgent
+
+    def check_thresholds(self, now: float) -> tuple[Optional[float], bool]:
+        if not self.active:
+            return None, False
+        if self.pending_refresh_value is not None:
+            return None, False
+        value = self.estimate(now)
+        if value is None:
+            return None, False
+        return self._trigger_thresholds_at(value)
+
     def mark_seen(
         self, detection: Detection, now: float, actionable: bool = True
     ) -> Optional[str]:
@@ -317,7 +350,6 @@ class TrackerState:
         if not (0.0 <= value <= self.max_reasonable_seconds):
             return None, False
 
-        previous_timer = self.last_timer
         previous_estimate = self.estimate(now)
         was_active = self.active
 
@@ -373,39 +405,7 @@ class TrackerState:
         self.last_ocr_text = result.text
         self.last_ocr_mode = result.mode
 
-        if self.alert_mode != "thresholds":
-            return None, False
-
-        warnings_desc = sorted(set(self.warnings), reverse=True)
-        if not warnings_desc:
-            return None, False
-
-        crossed: list[float] = []
-        if not was_active:
-            # Starting the script mid-buff should still warn, but only with the
-            # most urgent applicable threshold rather than playing every sound.
-            crossed = [threshold for threshold in warnings_desc if value <= threshold]
-        elif not refreshed and previous_estimate is not None:
-            # Compare with the last OCR reading as well as its time-adjusted
-            # estimate. Otherwise a threshold crossed between OCR samples could
-            # be missed because the estimate is already below it.
-            upper_bound = max(previous_estimate, previous_timer or previous_estimate)
-            crossed = [
-                threshold
-                for threshold in warnings_desc
-                if threshold not in self.fired
-                and upper_bound > threshold >= value
-            ]
-
-        if not crossed:
-            return None, False
-
-        chosen = min(crossed)  # Most urgent threshold reached.
-        for threshold in warnings_desc:
-            if value <= threshold:
-                self.fired.add(threshold)
-        urgent = chosen == min(warnings_desc)
-        return chosen, urgent
+        return self._trigger_thresholds_at(value)
 
 
 class SoundWorker:
@@ -1903,6 +1903,22 @@ def alert_sound_path(buff: dict[str, Any], urgent: bool = False) -> Path:
     return BASE_DIR / str(buff["sound"])
 
 
+def play_threshold_alert(
+    sound_worker: SoundWorker,
+    buff: dict[str, Any],
+    state: TrackerState,
+    crossed: float,
+    urgent: bool,
+) -> None:
+    sound_path = alert_sound_path(buff, urgent=urgent)
+    print(
+        f"\n[ALERT] {state.name}: approximately {crossed:g}s remaining"
+        + (" — URGENT" if urgent else "")
+    )
+    label = f"{state.name} urgent" if urgent else state.name
+    sound_worker.play(sound_path, 1, label)
+
+
 def run_sound_test(config: dict[str, Any]) -> None:
     worker = SoundWorker()
     try:
@@ -1973,10 +1989,10 @@ def run_monitor(args: argparse.Namespace) -> None:
                     time.sleep(0.35)
                     continue
 
-                now = time.monotonic()
                 for key, state in states.items():
                     buff = config["buffs"][key]
                     frame = grab_bgr(sct, monitor, search_boxes[key])
+                    now = time.monotonic()
                     actionable = True
                     if state.alert_mode == "on_ready":
                         detection, actionable = locate_ready_icon(
@@ -2050,9 +2066,14 @@ def run_monitor(args: argparse.Namespace) -> None:
                     if state.alert_mode in {"on_expire", "on_ready"}:
                         continue
 
-                    if now - last_ocr_attempt[key] < ocr_interval:
+                    crossed, urgent = state.check_thresholds(time.monotonic())
+                    if crossed is not None:
+                        play_threshold_alert(sound_worker, buff, state, crossed, urgent)
+
+                    ocr_started_at = time.monotonic()
+                    if ocr_started_at - last_ocr_attempt[key] < ocr_interval:
                         continue
-                    last_ocr_attempt[key] = now
+                    last_ocr_attempt[key] = ocr_started_at
 
                     timer_offset = buff.get("timer_offset")
                     timer_size = buff.get("timer_size")
@@ -2075,31 +2096,37 @@ def run_monitor(args: argparse.Namespace) -> None:
                         max_reasonable=float(buff.get("max_reasonable_seconds", 180)),
                     )
                     if result is None:
+                        crossed, urgent = state.check_thresholds(time.monotonic())
+                        if crossed is not None:
+                            play_threshold_alert(
+                                sound_worker, buff, state, crossed, urgent
+                            )
                         continue
 
                     crossed, urgent = state.accept_timer(result, now)
                     if crossed is not None:
-                        sound_path = alert_sound_path(buff, urgent=urgent)
-                        repeat = 1
-                        print(
-                            f"\n[ALERT] {state.name}: approximately {crossed:g}s remaining"
-                            + (" — URGENT" if urgent else "")
-                        )
-                        label = f"{state.name} urgent" if urgent else state.name
-                        sound_worker.play(sound_path, repeat, label)
+                        play_threshold_alert(sound_worker, buff, state, crossed, urgent)
+                    else:
+                        crossed, urgent = state.check_thresholds(time.monotonic())
+                        if crossed is not None:
+                            play_threshold_alert(
+                                sound_worker, buff, state, crossed, urgent
+                            )
 
                     if args.debug:
                         DEBUG_DIR.mkdir(parents=True, exist_ok=True)
                         cv2.imwrite(str(DEBUG_DIR / f"{key}_timer.png"), timer_crop)
 
-                status_width = print_status(status_text(states, now), status_width)
+                status_now = time.monotonic()
+                status_width = print_status(status_text(states, status_now), status_width)
 
-                if args.debug and now - last_debug_write >= 1.0:
+                debug_now = time.monotonic()
+                if args.debug and debug_now - last_debug_write >= 1.0:
                     DEBUG_DIR.mkdir(parents=True, exist_ok=True)
                     frame = grab_bgr(sct, monitor, full_monitor_box(monitor))
-                    annotated = debug_annotate(frame, states, config, now)
+                    annotated = debug_annotate(frame, states, config, debug_now)
                     cv2.imwrite(str(DEBUG_DIR / "latest.png"), annotated)
-                    last_debug_write = now
+                    last_debug_write = debug_now
 
                 elapsed = time.monotonic() - loop_started
                 if elapsed < scan_interval:
