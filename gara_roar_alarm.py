@@ -56,6 +56,7 @@ DEFAULT_BUFFS: dict[str, dict[str, Any]] = {
         "name": "Splinter Storm",
         "template": "templates/splinter_storm.png",
         "sound": "sounds/splinter_storm.wav",
+        "urgent_sound": "sounds/splinter_storm_urgent.wav",
         "alert_mode": "thresholds",
         "warnings": [10, 5],
         "match_threshold": 0.68,
@@ -379,7 +380,11 @@ class SoundWorker:
                     if os.name == "nt" and winsound is not None and path.is_file():
                         winsound.PlaySound(str(path), winsound.SND_FILENAME)
                     elif os.name == "nt" and winsound is not None:
-                        fallback = 1500 if "Splinter" in label else 900
+                        lower_label = label.lower()
+                        if "urgent" in lower_label:
+                            fallback = 1900
+                        else:
+                            fallback = 1500 if "splinter" in lower_label else 900
                         winsound.Beep(fallback, 350)
                     else:  # Basic fallback for non-Windows terminals.
                         print("\a", end="", flush=True)
@@ -434,7 +439,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--test-sounds",
         action="store_true",
-        help="play both configured alert sounds and exit",
+        help="play configured alert sounds and exit",
     )
     parser.add_argument(
         "--list-monitors",
@@ -1154,6 +1159,8 @@ def calibrate_buff(
                 defaults.get("inactive_reminder_repeat", 1)
             ),
         }
+        if "urgent_sound" in defaults:
+            buff_config["urgent_sound"] = str(defaults["urgent_sound"])
 
         # Roar is deliberately icon-only. It uses the stable bottom-right
         # ready/off icon and alerts when that icon returns after a cast.
@@ -1604,15 +1611,29 @@ def print_status(line: str, previous_width: int) -> int:
     return width
 
 
+def alert_sound_path(buff: dict[str, Any], urgent: bool = False) -> Path:
+    if urgent:
+        urgent_sound = str(buff.get("urgent_sound", "")).strip()
+        if urgent_sound:
+            return BASE_DIR / urgent_sound
+    return BASE_DIR / str(buff["sound"])
+
+
 def run_sound_test(config: dict[str, Any]) -> None:
     worker = SoundWorker()
     try:
-        for key, buff in config["buffs"].items():
+        for buff in config["buffs"].values():
             name = str(buff["name"])
-            path = BASE_DIR / str(buff["sound"])
+            path = alert_sound_path(buff)
             print(f"Playing {name}: {path}")
             worker.play(path, 1, name)
             time.sleep(1.8)
+            urgent_sound = str(buff.get("urgent_sound", "")).strip()
+            if urgent_sound:
+                urgent_path = alert_sound_path(buff, urgent=True)
+                print(f"Playing {name} urgent: {urgent_path}")
+                worker.play(urgent_path, 1, f"{name} urgent")
+                time.sleep(1.8)
     finally:
         worker.close()
 
@@ -1748,13 +1769,14 @@ def run_monitor(args: argparse.Namespace) -> None:
 
                     crossed, urgent = state.accept_timer(result, now)
                     if crossed is not None:
-                        sound_path = BASE_DIR / str(buff["sound"])
+                        sound_path = alert_sound_path(buff, urgent=urgent)
                         repeat = 2 if urgent else 1
                         print(
                             f"\n[ALERT] {state.name}: approximately {crossed:g}s remaining"
                             + (" — URGENT" if urgent else "")
                         )
-                        sound_worker.play(sound_path, repeat, state.name)
+                        label = f"{state.name} urgent" if urgent else state.name
+                        sound_worker.play(sound_path, repeat, label)
 
                     if args.debug:
                         DEBUG_DIR.mkdir(parents=True, exist_ok=True)

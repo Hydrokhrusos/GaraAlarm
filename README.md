@@ -6,7 +6,7 @@ It does **not** press keys, recast abilities, read game memory, inject code, or 
 
 ## Alert behavior
 
-- **Splinter Storm:** warns at **10 seconds** and again urgently at **5 seconds** remaining.
+- **Splinter Storm:** warns at **10 seconds** with the regular sound and again urgently at **5 seconds** with a separate urgent sound.
 - **Roar:** gives **no warning while Roar is active**. It calibrates from the stable bottom-right ready/off icon, arms after that icon disappears for 1.8 seconds, then sounds the Roar alarm when the ready/off icon returns. It reminds you every **8 seconds** while Roar stays ready.
 
 Roar tracking arms only after the script has first confirmed the ready/off icon, then seen it disappear. This prevents it from yelling in the Orbiter or before your first cast.
@@ -59,7 +59,7 @@ After calibration, open `config.json`.
 "warnings": [10, 5]
 ```
 
-The first value is the early warning; the smaller value is urgent and repeats the sound.
+The first value is the early warning; the smaller value is urgent. Splinter Storm uses `sound` for the early warning and `urgent_sound` for the urgent warning, falling back to `sound` if `urgent_sound` is omitted.
 
 ### Roar cast confirmation delay
 

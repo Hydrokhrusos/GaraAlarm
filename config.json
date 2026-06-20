@@ -36,6 +36,7 @@
       "name": "Splinter Storm",
       "template": "templates/splinter_storm.png",
       "sound": "sounds/splinter_storm.wav",
+      "urgent_sound": "sounds/splinter_storm_urgent.wav",
       "alert_mode": "thresholds",
       "warnings": [
         10,
